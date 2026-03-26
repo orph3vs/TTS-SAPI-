@@ -28,6 +28,15 @@ function Read-TextFile {
     return $utf8Text
 }
 
+function New-Text {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int[]]$CodePoints
+    )
+
+    return (-join ($CodePoints | ForEach-Object { [char]$_ }))
+}
+
 function Get-PreferredVoice {
     $probeVoice = New-Object -ComObject SAPI.SpVoice
     try {
@@ -42,6 +51,81 @@ function Get-PreferredVoice {
     finally {
         [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($probeVoice)
     }
+}
+
+function Convert-IntegerToKoreanReading {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$Number
+    )
+
+    $digits = @(
+        "",
+        (New-Text @(0xC77C)),
+        (New-Text @(0xC774)),
+        (New-Text @(0xC0BC)),
+        (New-Text @(0xC0AC)),
+        (New-Text @(0xC624)),
+        (New-Text @(0xC721)),
+        (New-Text @(0xCE60)),
+        (New-Text @(0xD314)),
+        (New-Text @(0xAD6C))
+    )
+
+    if ($Number -eq 0) {
+        return (New-Text @(0xC601))
+    }
+
+    if ($Number -lt 0) {
+        return (New-Text @(0xB9C8, 0xC774, 0xB108, 0xC2A4)) + " " + (Convert-IntegerToKoreanReading -Number (-1 * $Number))
+    }
+
+    if ($Number -lt 10) {
+        return $digits[$Number]
+    }
+
+    if ($Number -lt 100) {
+        $tens = [math]::Floor($Number / 10)
+        $ones = $Number % 10
+        $text = if ($tens -eq 1) { New-Text @(0xC2ED) } else { $digits[$tens] + (New-Text @(0xC2ED)) }
+        if ($ones -gt 0) {
+            $text += $digits[$ones]
+        }
+        return $text
+    }
+
+    return [string]$Number
+}
+
+function Normalize-TextForSpeech {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text
+    )
+
+    $normalizedLines = foreach ($line in ($Text -split "`r?`n")) {
+        $normalizedLine = [System.Text.RegularExpressions.Regex]::Replace(
+            $line,
+            '\uC81C(\d{1,2})(?=[\uAC00-\uD7A3])',
+            {
+                param($match)
+                (New-Text @(0xC81C)) + (Convert-IntegerToKoreanReading -Number ([int]$match.Groups[1].Value))
+            }
+        )
+
+        if ($normalizedLine -match '^(\s*)(\d{1,2})([.)])(\s+.*)$') {
+            $prefix = $matches[1]
+            $number = [int]$matches[2]
+            $punctuation = $matches[3]
+            $suffix = $matches[4]
+            $prefix + (Convert-IntegerToKoreanReading -Number $number) + $punctuation + $suffix
+            continue
+        }
+
+        $normalizedLine
+    }
+
+    return ($normalizedLines -join [Environment]::NewLine)
 }
 
 function Convert-TextToWave {
@@ -118,7 +202,7 @@ if ($textFiles.Count -eq 0) {
 }
 
 $voiceToken = Get-PreferredVoice
-$voiceDescription = if ($null -ne $voiceToken) { $voiceToken.GetDescription() } else { "기본 음성" }
+$voiceDescription = if ($null -ne $voiceToken) { $voiceToken.GetDescription() } else { "Default voice" }
 
 Write-Host "Selected voice: $voiceDescription"
 Write-Host "Files to process: $($textFiles.Count)"
@@ -135,7 +219,9 @@ foreach ($file in $textFiles) {
         Write-Host "  Skipped: file is empty."
         continue
     }
-    Convert-TextToWave -Text $text -OutputPath $outputPath -VoiceToken $voiceToken
+
+    $normalizedText = Normalize-TextForSpeech -Text $text
+    Convert-TextToWave -Text $normalizedText -OutputPath $outputPath -VoiceToken $voiceToken
 }
 
 Write-Host ""
